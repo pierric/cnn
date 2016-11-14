@@ -7,10 +7,14 @@ import qualified Data.Vector.Storable as SV
 import System.Random.MWC
 import System.Random.MWC.Distributions
 import Control.Monad.ST
-import Control.Monad (liftM2)
+import Control.Monad (liftM2, forM_, when)
 import Control.Exception (assert)
 import GHC.Float
 import Utils
+import Debug.Trace
+import Text.PrettyPrint.Free hiding (flatten)
+import Text.Printf (printf)
+import Data.STRef
 
 type R = Float
 
@@ -57,7 +61,8 @@ instance Component DLayer where
             !d = scale (negate rate) udelta
             !m = iv `outer` d
             !idelta = w #> udelta
-        in (l{dweights=w `add` m, dbiases=b `add` d}, idelta)
+        in --trace ("DL:" ++ show odelta)
+           (l{dweights=w `add` m, dbiases=b `add` d}, idelta)
 
 data CLayer = CLayer {
   cfilters :: !(V.Vector (Matrix R)), cbiases :: !(V.Vector R), cpadding :: !Int
@@ -69,33 +74,34 @@ instance Component CLayer where
     -- trace is (input, convoluted output)
     newtype Trace CLayer = CTrace (Matrix R, Int, V.Vector (Matrix R))
     forwardT (CLayer{cfilters=fs, cbiases=bs, cpadding=p}) !inp =
-        let !ov = V.zipWith feature fs bs
+        let ov = parallel $ V.zipWith feature fs bs
         in assert ok $ CTrace (inpsumup,V.length inp,ov)
       where
-        !osize = let (w,_) = size (inp V.! 0)
-                     (u,_) = size (fs  V.! 0)
+        !osize = let (w,_) = size (V.head inp)
+                     (u,_) = size (V.head fs)
                  in w+2*p-u+1
         !inpsumup = V.foldl1' add inp
         feature :: Matrix R -> R -> Matrix R
         feature f b = layerCorr2 p f inpsumup `add` konst b (osize,osize)
         ok = let
-                 s0 = size (inp V.! 0) :: (Int,Int)
+                 s0 = size (V.head inp) :: (Int,Int)
                  -- all channel are of the same size and are square
                  c1 = fst s0 == snd s0 && V.all ((==s0) . size) inp
-                 t0 = size (fs  V.! 0) :: (Int,Int)
+                 t0 = size (V.head fs)  :: (Int,Int)
                  -- all filters are of the same size and are square
                  c2 = fst t0 == snd t0 && V.all ((==t0) . size) fs
              in c1 && c2
-    output (CTrace (_,_,!a)) = a
+    output (CTrace (_,_,a)) = a
     learn l (CTrace (!iv,!is,!av)) !odelta rate =
       let CLayer{cfilters=fs, cbiases=bs, cpadding=p} = l
           di :: Matrix R
-          !di = V.foldl1' add $ V.zipWith (layerConv2 p) fs odelta
+          !di = V.foldl1' add $ parallel $ V.zipWith (layerConv2 p) fs odelta
           idelta :: V.Vector (Matrix R)
           !idelta = V.replicate is di
-          !dm = V.map (scale (negate rate) . layerCorr2 p iv) odelta
-          !db = V.map ((* negate rate) . sumElements) odelta
-      in (l{cfilters=V.zipWith add fs dm, cbiases=V.zipWith (+) bs db}, idelta)
+          !dm = parallel $ V.map (scale (negate rate) . layerConv2 p iv) odelta
+          !db = parallel $ V.map ((* negate rate) . sumElements) odelta
+      in --trace ("CL:" ++ show odelta)
+         (l{cfilters=V.zipWith add fs dm, cbiases=V.zipWith (+) bs db}, idelta)
 
 data MaxPoolLayer = MaxPoolLayer Int
 
@@ -112,12 +118,17 @@ instance Component MaxPoolLayer where
   forwardT (MaxPoolLayer stride) !inp = PTrace $ V.map pool inp
     where
       pool inp = let blks = toBlocksEvery stride stride inp :: [[Matrix R]]
-                     !oi = map (map maxIndex) blks
-                     !ov = fromLists $ zipWith (zipWith atIndex) blks oi
+                     mxiv = unzip $ map (unzip . map unsafeMaxIndEle) blks
+                     !oi  = fst mxiv
+                     !ov  = fromLists (snd mxiv)
+                     -- !oi = map (map maxIndex) blks
+                     -- !ov = fromLists $ zipWith (zipWith atIndex) blks oi
                  in (oi,size ov,ov)
   output (PTrace a) = V.map (\(_,_,o) ->o) a
   -- use the saved index-of-max in each pool to propagate the error.
-  learn l@(MaxPoolLayer stride) (PTrace t) odelta _ = (l, V.zipWith gen t odelta)
+  learn l@(MaxPoolLayer stride) (PTrace t) odelta _ =
+      --trace ("ML:" ++ show odelta)
+      (l, V.zipWith gen t odelta)
     where
       gen (!iv,!si,_) od =
          let sub i v = assoc (stride, stride) 0 [(i,v)]
@@ -151,7 +162,7 @@ instance Component ReshapeLayer where
   newtype Trace ReshapeLayer = ReshapeTrace (Int, Int, Int, Vector R)
   forwardT _ !inp =
     let !b = V.length inp
-        (!r,!c) = size (inp V.! 0)
+        (!r,!c) = size (V.head inp)
         !o = V.foldr' (\x y -> flatten x SV.++ y) SV.empty inp
     in ReshapeTrace (b, r*c, c, o)
   output (ReshapeTrace (_,_,_,a)) = a
@@ -174,7 +185,7 @@ instance (Component a, Component b, Out a ~ Inp b) => Component (a :+> b) where
             (a', !idelta ) = learn a tra odelta' rate
         in (a':+>b', idelta)
 
-infixl 0 ++>
+infixr 0 ++>
 (++>) :: (Monad m, Component a, Component b, Component (a :+> b))
       => m a -> m b -> m (a :+> b)
 (++>) = liftM2 (:+>)
@@ -185,24 +196,29 @@ newDLayer :: (Int, Int)         -- number of input channels, number of neurons (
 newDLayer sz@(_,n) (af, af') =
     withSystemRandom . asGenIO $ \gen -> do
         w <- buildMatrix gen sz
-        b <- return $ konst 1 n
+        b <- return $ konst 0.1 n
         return $ DLayer w b af af'
 
-newCLayer :: Int                -- number of filter
-          -> Int                -- stride of each filter
-          -> Int                -- number of padding
-          -> IO CLayer
+newCLayer :: Int -> Int -> Int -> IO CLayer
 newCLayer nfilter sfilter npadding =
   withSystemRandom . asGenIO $ \gen -> do
       fs <- V.replicateM nfilter $ buildMatrix gen (sfilter, sfilter)
-      bs <- return $ V.replicate nfilter 1
+      bs <- return $ V.replicate nfilter 0.1
       return $ CLayer fs bs npadding
+  -- where
+  --   !n = 1 / sqrt(fromIntegral nfilter) * (fromIntegral sfilter)
+  --   buildMatrix g = do
+  --     vals <- sequence (replicate (nr*nc) (double2Float <$> uniformR (-n,n) g))
+  --     return $ (nr >< nc) vals
 
 maxPool :: Int -> IO MaxPoolLayer
 maxPool = return . MaxPoolLayer
 
 reshape' :: IO ReshapeLayer
 reshape' = return ReshapeLayer
+
+reluMulti :: IO (ReluLayerM (Matrix R))
+reluMulti = return ReluLayerM
 
 learnStep :: Component n
     => (Out n -> Out n -> Out n)  -- derivative of the cost function
@@ -239,5 +255,68 @@ cost' a y | y == 1 && a >= y = 0
           | otherwise        = a - y
 
 buildMatrix g (nr, nc) = do
-  vals <- sequence (replicate (nr*nc) (double2Float <$> normal 0 0.01 g))
+  vals <- sequence (replicate (nr*nc) (double2Float <$> normal 0 0.1 g))
   return $ (nr >< nc) vals
+
+instance Pretty (Matrix R) where
+  pretty mat = pretty (dispf 2 $ double mat)
+instance Pretty (Vector R) where
+  pretty vec = encloseSep langle rangle comma $ map (text . printf "%.04f") $ SV.toList vec
+instance Pretty CLayer where
+  pretty (CLayer f b p) =
+    let tm = tupled $ V.map pretty f
+        tb = text "biased by " <+> (tupled $ V.map pretty b)
+        tp = text "padded by " <+> pretty p
+    in vsep [text "==>CL", tm, tb, tp]
+instance Pretty DLayer where
+  pretty (DLayer w b _ _) =
+    let tm = pretty w
+        tb = text "biased by " <+> pretty b
+    in vsep [text "==>DL", tm, tb]
+instance Pretty ReshapeLayer where
+  pretty (ReshapeLayer) =
+    text "==>RL"
+instance Pretty MaxPoolLayer where
+  pretty (MaxPoolLayer n) =
+    hcat [text "==>ML(", pretty n, text ")"]
+instance Pretty (ReluLayerM a) where
+  pretty (ReluLayerM) =
+    text "==>AL"
+instance (Pretty a, Pretty b) => Pretty (a :+> b) where
+  pretty (a:+>b) =
+    let sep = hcat (replicate 40 $ char '~')
+    in vsep [pretty a, sep, pretty b]
+instance Pretty a => Pretty (V.Vector a) where
+  pretty vec = list (V.map pretty vec)
+instance Show CLayer where
+  show = show . pretty
+instance Show DLayer where
+  show = show . pretty
+instance (Pretty a, Pretty b) => Show (a :+> b) where
+  show = show . pretty
+
+unsafeMaxIndEle :: Matrix R -> (IndexOf Matrix, R)
+-- unsafeMaxIndex m = unsafePerformIO $ apply m id f
+--   where
+--     f row col xrow 1 ptr = do
+--       mp <- newIORef (0,0)
+--       mv <- newIORef (-1000.0)
+--       forM_ [1..row] $ \ r -> do
+--         forM_ [1..col] $ \ c -> do
+--           return expression
+--     f row col xrow _ ptr = error "unsafeMaxIndex only for RowMajor matrix"
+unsafeMaxIndEle m = runST $ do
+  mm <- unsafeThawMatrix m
+  mp <- newSTRef (0,0)
+  mv <- newSTRef (-10000.0)
+  let (row,col) = size m
+  forM_ [0..row-1] $ \ r -> do
+    forM_ [0..col-1] $ \ c -> do
+      v1 <- unsafeReadMatrix mm r c
+      v0 <- readSTRef mv
+      when (v1 > v0) $ do
+        writeSTRef mv v1
+        writeSTRef mp (r,c)
+  p <- readSTRef mp
+  v <- readSTRef mv
+  return (p, v)

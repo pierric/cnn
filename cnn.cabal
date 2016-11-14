@@ -20,6 +20,6 @@ executable cnn
   other-modules:       CNN, Utils, Parser, Parser1
   -- other-extensions:
   build-depends:       base, hmatrix, hmatrix-gsl, mwc-random, zlib,
-                       binary, bytestring, boxes, vector, deepseq, parallel
+                       binary, bytestring, vector, deepseq, parallel, wl-pprint-extras
   -- hs-source-dirs:
   default-language:    Haskell2010

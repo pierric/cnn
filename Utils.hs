@@ -9,15 +9,19 @@ import Control.DeepSeq
 import Control.Parallel
 import Control.Parallel.Strategies
 import Control.Monad
+import qualified Data.Vector as VecB
+import qualified Data.Vector.Generic as VecGeneric
+import qualified Data.Vector.Fusion.Bundle as VecFusion
+import qualified Data.Vector.Fusion.Bundle.Monadic as VecFusionM
 import qualified Data.Vector.Storable as VecS
 import qualified Data.Vector.Storable.Mutable as VecM
 
 fft2d :: Matrix (Complex Double) -> Matrix (Complex Double)
-fft2d m = let !x = fromRows $ map fft $ toRows m
+fft2d m = let !x = fromRows $ map fft $ unsafeToRows m
               !y = fromColumns $ map fft $ toColumns x
           in y
 ifft2d :: Matrix (Complex Double) -> Matrix (Complex Double)
-ifft2d m = let !x = fromRows $ map ifft $ toRows m
+ifft2d m = let !x = fromRows $ map ifft $ unsafeToRows m
                !y = fromColumns $ map ifft $ toColumns x
            in y
 
@@ -51,7 +55,7 @@ conv2d_b !k !m | w1 > w2 && h1 < h2 = error "convolution cannot be performed"
         !z2 = konst 0 (hw, hh)
         m1' = fft2d $ fromBlocks [[m1,0],[0,z1]]
         m2' = fft2d $ fromBlocks [[m2,0],[0,z2]]
-        mr  = ifft2d $ (force m2' `par` (force m1' `pseq` hadamard m1' m2'))
+        mr  = ifft2d $ (force m1' `par` (force m2' `pseq` hadamard m1' m2'))
         ms  = subMatrix (w1-1,h1-1) (w2-w1+1,h2-h1+1) $ fst . fromComplex $ mr
     in fromDouble $ ms
   where
@@ -86,7 +90,7 @@ corr2d_s k m | w > s && h < t = error "correlation cannot be performed"
         mat <- VecM.new (t_rows*t_cols)
         forM_ (zip [0..] subs) $ \(ri,rm) -> do
             let bs = t_cols*ri
-            forM_ (zip [0..] $ toRows rm) $ \(ci, rv) -> do
+            forM_ (zip [0..] $ unsafeToRows rm) $ \(ci, rv) -> do
                 let tv = VecM.unsafeSlice (bs+h*ci) h mat
                 VecS.unsafeCopy tv rv
         return mat
@@ -119,3 +123,16 @@ instance (Num a, Element a) => Multiplicable (Vector a)
 instance (Num a, Element a) => Multiplicable (Matrix a)
   where
     hadamard a b = reshape (cols a) (flatten a `hadamard` flatten b)
+
+-- parallel :: NFData a => VecB.Vector a -> VecB.Vector a
+-- parallel vec =
+--     VecB.fromList (parlist $ VecB.toList vec)
+--   where
+--     parlist []     = []
+--     parlist [a]    = [a]
+--     parlist (a:as) = (as `using` parList rdeepseq) `pseq` a:as
+
+parallel :: NFData a => VecB.Vector a -> VecB.Vector a
+parallel vec = (VecB.tail vec `using` parvec) `pseq` vec
+  where
+    parvec = VecB.mapM (rparWith rdeepseq)
