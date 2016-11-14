@@ -17,11 +17,11 @@ import Control.Monad
 
 main = mnistMain
 
-mnistMain = debug3 -- makeMNIST >>= dotest
+mnistMain = makeMNIST >>= dotest
 
-debug = do
-    let n1 = CLayer (V.fromList $ [(3><3)[-0.2,-0.2,-0.2,0,0,0,0,0,0], (3><3)[0,0,0,0,0.2,0.2,0.2,0,0]])
-                    (V.fromList $ [1,1])
+debug1 = do
+    let n1 = CLayer (V.singleton $ V.fromList $ [(3><3)[-0.2,-0.2,-0.2,0,0,0,0,0,0], (3><3)[0,0,0,0,0.2,0.2,0.2,0,0]])
+                    (V.fromList $ [0.1,0.1])
                     1
     nx <- reluMulti
     n2 <- maxPool 2
@@ -33,53 +33,49 @@ debug = do
                                   ,5,5,5,0
                                   ,5,5,5,0
                                   ,5,5,5,0]
-        ev = fromList [0.5,0.5] :: Vector CNN.R
+        ev = fromList [0.2,0.8] :: Vector CNN.R
+    let rate = 0.02
     putStrLn $ replicate 40 '-'
-    nn <- traceNN nn ds ev 1
+    nn <- traceNN nn ds ev rate
     putStrLn $ replicate 40 '-'
-    putStrLn "##forward"
-    tracef nn ds
+    nn <- traceNN nn ds ev rate
     putStrLn $ replicate 40 '-'
-    nn <- traceNN nn ds ev 1
+    nn <- traceNN nn ds ev rate
     putStrLn $ replicate 40 '-'
-    putStrLn "##forward"
-    tracef nn ds
+    nn <- traceNN nn ds ev rate
+    putStrLn $ replicate 40 '-'
+    nn <- traceNN nn ds ev rate
+    putStrLn $ replicate 40 '-'
+    nn <- traceNN nn ds ev rate
+    putStrLn $ replicate 40 '-'
 
 debug2 = do
-  let n1 = newCLayer 32 5 2 ++> reluMulti ++> maxPool 2
-      n2 = newCLayer 64 5 2 ++> reluMulti ++> maxPool 2
-      n3 = newDLayer (3136, 1024) (relu, relu') ++> newDLayer (1024,  10) (relu, relu')
-      n4 = reshape' ++> newDLayer (196,30) (relu, relu') ++> newDLayer (30,10) (relu, relu')
-  nn <- newCLayer 1 1 0 ++> reluMulti ++>maxPool 2 ++> n4
+  nn <- newCLayer 1 2 3 1 ++> reluMulti ++> maxPool 2 ++>
+        newCLayer 2 4 3 1 ++> reluMulti ++> maxPool 2 ++>
+        reshape' ++> newDLayer (196,30) (relu, relu') ++> newDLayer (30,10) (relu, relu')
   putStrLn "Load training data."
-  (ds,ev) <- head . uncurry zip <$> trainingData
+  dataset <- uncurry zip <$> trainingData
+  let ts = take 120 dataset
   putStrLn "Load test data."
-  nn <- foldM (\nn' _ -> traceNN nn' ds ev 0.001) nn [1..60]
-  -- nn <- traceNN nn ds ev 0.001
-  -- putStrLn $ replicate 40 '-'
-  -- nn <- traceNN nn ds ev 0.001
-  -- putStrLn $ replicate 40 '-'
-  -- nn <- traceNN nn ds ev 0.001
-  putStrLn $ "+" ++ prettyResult (forward nn ds)
-  putStrLn $ "*" ++ prettyResult ev
-  return ()
+  nn <- foldM (\x _ -> do
+          foldM (\x (i,(ds,ev)) -> do
+            traceERR x ds ev 0.002 ("D" ++ show i)) x (zip [1..] ts)) nn [1..400]
+  flip mapM_ (take 10 dataset) $ \(ds,ev) -> do
+    putStrLn $ "+" ++ prettyResult (forward nn ds)
+    putStrLn $ "*" ++ prettyResult ev
 
 debug3 = do
   a0:a1:_ <- getArgs
   let cycle = read a0 :: Int
       rate  = read a1 :: Float
-  let n1 = newCLayer 32 5 2 ++> reluMulti ++> maxPool 2
-      n2 = newCLayer 64 5 2 ++> reluMulti ++> maxPool 2
-      n3 = newDLayer (3136, 1024) (relu, relu') ++> newDLayer (1024,  10) (relu, relu')
-      n4 = reshape' ++> newDLayer (392,30) (relu, relu') ++> newDLayer (30,10) (relu, relu')
-  -- nn <- n1 ++> n2 ++> reshape' ++> n3
-  nn <- newCLayer 32 5 2 ++> reluMulti ++>maxPool 2 ++>
-        newCLayer 64 5 2 ++> reluMulti ++>maxPool 2 ++>
-        reshape' ++> newDLayer (3136,1024) (relu, relu') ++> newDLayer (1024,10) (relu, relu')
+  nn <- newCLayer 1 1 1 0 ++>
+        reluMulti ++> maxPool 2 ++>
+        -- newCLayer 8 16 5 2 ++> reluMulti ++>maxPool 2 ++>
+        reshape' ++> newDLayer (196,30) (relu, relu') ++> newDLayer (30,10) (relu, relu')
   putStrLn "Load training data."
-  dataset <- take 250 . uncurry zip <$> trainingData
+  dataset <- take 120 . uncurry zip <$> trainingData
   nn <- iterateM cycle (online rate dataset) nn
-  flip mapM_ (take 12 dataset) $ \(ds,ev) -> do
+  flip mapM_ (take 10 dataset) $ \(ds,ev) -> do
     putStrLn $ "+" ++ prettyResult (forward nn ds)
     putStrLn $ "*" ++ prettyResult ev
   where
@@ -128,32 +124,42 @@ traceNN nn iv ev rt = do
   putStrLn $ show nn'
   return nn'
 
+traceERR nn iv ev rt lbl = do
+  putStrLn $ lbl ++ "##forward"
+  let ot = forwardT nn iv
+  putStrLn $ lbl ++ "##backward"
+  let err = cost' (output ot) ev
+  putStrLn $ lbl ++ "##Err:" ++ show err
+  let nn' = fst $ learn nn ot err rt
+  return nn'
+
 makeMNIST = do
-    let n1 = newCLayer 32 5 2 ++> reluMulti ++> maxPool 2
-        n2 = newCLayer 64 5 2 ++> reluMulti ++> maxPool 2
+    let n1 = newCLayer 1  32 5 2 ++> reluMulti ++> maxPool 2
+        n2 = newCLayer 32 64 5 2 ++> reluMulti ++> maxPool 2
         n3 = newDLayer (3136, 1024) (relu, relu') ++> newDLayer (1024,  10) (relu, relu')
     nn <- n1 ++> n2 ++> reshape' ++> n3
     putStrLn "Load training data."
-    dataset <- take 500 . uncurry zip <$> trainingData
+    dataset <- take 200 . uncurry zip <$> trainingData
     putStrLn "Load test data."
     putStrLn "Learning."
-    iterateM 2 (online dataset) nn
+    iterateM 100 (online dataset) nn
 
 dotest :: (Component n, Inp n ~ Image, Out n ~ Label) => n -> IO ()
 dotest !nn = do
-    testset <- take 50 .uncurry zip <$> testData
+    testset <- uncurry zip <$> testData
     putStrLn "Start test"
     let result = map (postprocess . forward nn . fst) testset `using` parList rdeepseq
         expect = map (postprocess . snd) testset
         (co,wr)= partition (uncurry (==)) $ zip result expect
     putStrLn $ printf "correct: %d, wrong: %d" (length co) (length wr)
 
-online = flip (foldl' $ learnStep (zipVectorWith cost') 0.0001)
+online = flip (foldl' $ learnStep (zipVectorWith cost') 0.002)
 iterateM :: Int -> (a -> a) -> a -> IO a
 iterateM n f x = walk 0 x
   where
     walk !i !a | i == n    = return a
-               | otherwise = do putStrLn ("Iteration " ++ show i)
+               | otherwise = do -- when (i `mod` 10 == 0) $ putStrLn ("Iteration " ++ show i)
+                                putStrLn ("Iteration " ++ show i)
                                 walk (i+1) (f a)
 
 postprocess :: Vector CNN.R -> Int

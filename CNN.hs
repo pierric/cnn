@@ -64,44 +64,62 @@ instance Component DLayer where
         in --trace ("DL:" ++ show odelta)
            (l{dweights=w `add` m, dbiases=b `add` d}, idelta)
 
+-- convolutional layer
+-- # input channels: m
+-- # output channels: n
+-- # features: m x n
+-- # biases: n
 data CLayer = CLayer {
-  cfilters :: !(V.Vector (Matrix R)), cbiases :: !(V.Vector R), cpadding :: !Int
+  cfilters :: !(V.Vector (V.Vector (Matrix R))), -- feature matrix major index by each input
+  cbiases  :: !(V.Vector R),
+  cpadding :: !Int
 }
 
 instance Component CLayer where
     type Inp CLayer = V.Vector (Matrix R)
     type Out CLayer = V.Vector (Matrix R)
     -- trace is (input, convoluted output)
-    newtype Trace CLayer = CTrace (Matrix R, Int, V.Vector (Matrix R))
+    newtype Trace CLayer = CTrace (Inp CLayer, V.Vector (Matrix R))
     forwardT (CLayer{cfilters=fs, cbiases=bs, cpadding=p}) !inp =
-        let ov = parallel $ V.zipWith feature fs bs
-        in assert ok $ CTrace (inpsumup,V.length inp,ov)
+        let ov = parallel $ V.zipWith feature
+                              (tr fs) -- feature matrix major index by each output
+                              bs      -- biases by each output
+        in assert ok $ CTrace (inp,ov)
       where
         !osize = let (w,_) = size (V.head inp)
-                     (u,_) = size (V.head fs)
+                     (u,_) = size (V.head $ V.head fs)
                  in w+2*p-u+1
-        !inpsumup = V.foldl1' add inp
-        feature :: Matrix R -> R -> Matrix R
-        feature f b = layerCorr2 p f inpsumup `add` konst b (osize,osize)
+        -- transpose the feature matrix
+        tr :: V.Vector (V.Vector a) -> V.Vector (V.Vector a)
+        tr vv = let n = V.length (V.head vv)
+                in V.map (\i -> V.map (V.! i) vv) $ V.enumFromN 0 n
+        feature :: V.Vector (Matrix R) -> R -> Matrix R
+        feature f b = V.foldl1' add (V.zipWith (layerCorr2 p) f inp)
+                      `add` konst b (osize,osize)
         ok = let
-                 s0 = size (V.head inp) :: (Int,Int)
                  -- all channel are of the same size and are square
+                 s0 = size (V.head inp) :: (Int,Int)
                  c1 = fst s0 == snd s0 && V.all ((==s0) . size) inp
-                 t0 = size (V.head fs)  :: (Int,Int)
-                 -- all filters are of the same size and are square
-                 c2 = fst t0 == snd t0 && V.all ((==t0) . size) fs
-             in c1 && c2
-    output (CTrace (_,_,a)) = a
-    learn l (CTrace (!iv,!is,!av)) !odelta rate =
+                 -- all features are of the same size and are square
+                 t0 = size $ V.head $ V.head fs :: (Int, Int)
+                 c3 = fst t0 == snd t0 && V.all (V.all ((==t0) . size)) fs
+                 -- each row has the same number of columns in the feature matrix
+                 m  = V.length (V.head fs)  :: Int
+                 c2 = V.all ((==m) . V.length) fs
+             in c1 && c2 && c3
+    output (CTrace (_,a)) = a
+    learn l (CTrace (!iv,!av)) !odelta rate =
       let CLayer{cfilters=fs, cbiases=bs, cpadding=p} = l
-          di :: Matrix R
-          !di = V.foldl1' add $ parallel $ V.zipWith (layerConv2 p) fs odelta
           idelta :: V.Vector (Matrix R)
-          !idelta = V.replicate is di
-          !dm = parallel $ V.map (scale (negate rate) . layerConv2 p iv) odelta
+          !idelta = V.map (\f -> V.foldl1' add $ V.zipWith (layerConv2 p) f odelta) fs
+          dm :: V.Vector (V.Vector (Matrix R))  -- update to the feature matrix
+          !dm = parallel $ V.map (\c -> V.map (scale (negate rate) . layerCorr2 p c) odelta) iv
+          db :: V.Vector R -- update to the biases
           !db = parallel $ V.map ((* negate rate) . sumElements) odelta
       in --trace ("CL:" ++ show odelta)
-         (l{cfilters=V.zipWith add fs dm, cbiases=V.zipWith (+) bs db}, idelta)
+         (l{ cfilters= V.zipWith (V.zipWith add) fs dm
+           , cbiases = V.zipWith (+) bs db}
+         , idelta)
 
 data MaxPoolLayer = MaxPoolLayer Int
 
@@ -195,21 +213,26 @@ newDLayer :: (Int, Int)         -- number of input channels, number of neurons (
           -> IO DLayer          -- new layer
 newDLayer sz@(_,n) (af, af') =
     withSystemRandom . asGenIO $ \gen -> do
-        w <- buildMatrix gen sz
-        b <- return $ konst 0.1 n
+        w <- buildMatrix (normal 0 0.01 gen) sz
+        b <- return $ konst 1 n
         return $ DLayer w b af af'
 
-newCLayer :: Int -> Int -> Int -> IO CLayer
-newCLayer nfilter sfilter npadding =
+newCLayer :: Int -> Int -> Int -> Int -> IO CLayer
+newCLayer inpsize outsize sfilter npadding =
   withSystemRandom . asGenIO $ \gen -> do
-      fs <- V.replicateM nfilter $ buildMatrix gen (sfilter, sfilter)
-      bs <- return $ V.replicate nfilter 0.1
+      fs <- V.replicateM inpsize $ V.replicateM outsize $ buildMatrix (truncNormal 0 0.1 gen) (sfilter, sfilter)
+      bs <- return $ V.replicate outsize 0.1
       return $ CLayer fs bs npadding
-  -- where
-  --   !n = 1 / sqrt(fromIntegral nfilter) * (fromIntegral sfilter)
-  --   buildMatrix g = do
-  --     vals <- sequence (replicate (nr*nc) (double2Float <$> uniformR (-n,n) g))
-  --     return $ (nr >< nc) vals
+  where
+    truncNormal m s g = do
+      x <- standard g
+      if x >= 2.0 || x <= -2.0
+        then truncNormal m s g
+        else return $! m + s * x
+
+buildMatrix g (nr, nc) = do
+  vals <- sequence (replicate (nr*nc) (double2Float <$> g))
+  return $ (nr >< nc) vals
 
 maxPool :: Int -> IO MaxPoolLayer
 maxPool = return . MaxPoolLayer
@@ -253,10 +276,6 @@ relu' x | x < 0     = 0
 
 cost' a y | y == 1 && a >= y = 0
           | otherwise        = a - y
-
-buildMatrix g (nr, nc) = do
-  vals <- sequence (replicate (nr*nc) (double2Float <$> normal 0 0.1 g))
-  return $ (nr >< nc) vals
 
 instance Pretty (Matrix R) where
   pretty mat = pretty (dispf 2 $ double mat)

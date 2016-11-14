@@ -92,7 +92,7 @@ corr2d_s k m | w > s && h < t = error "correlation cannot be performed"
             let bs = t_cols*ri
             forM_ (zip [0..] $ unsafeToRows rm) $ \(ci, rv) -> do
                 let tv = VecM.unsafeSlice (bs+h*ci) h mat
-                VecS.unsafeCopy tv rv
+                {-# SCC "corr-data-copy" #-} VecS.unsafeCopy tv rv
         return mat
     !weights = flatten k
     !final   = reshape v $ transformed #> weights
