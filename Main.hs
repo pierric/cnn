@@ -2,7 +2,7 @@
 module Main where
 
 import CNN
-import Parser1
+import Parser
 
 import Numeric.LinearAlgebra
 import Numeric.LinearAlgebra.Data
@@ -68,14 +68,17 @@ debug3 = do
   a0:a1:_ <- getArgs
   let cycle = read a0 :: Int
       rate  = read a1 :: Float
-  nn <- newCLayer 1 1 1 0 ++>
-        reluMulti ++> maxPool 2 ++>
-        -- newCLayer 8 16 5 2 ++> reluMulti ++>maxPool 2 ++>
-        reshape' ++> newDLayer (196,30) (relu, relu') ++> newDLayer (30,10) (relu, relu')
+  -- nn <- newCLayer 1  16 5 2 ++> reluMulti ++> maxPool 2 ++>
+  --       newCLayer 16 32 5 2 ++> reluMulti ++> maxPool 2 ++>
+  --       reshape' ++> newDLayer (1568,1024) (relu, relu') ++> newDLayer (1024,10) (relu, relu')
+  nn <- newCLayer 1 4 7 3 ++> reluMulti ++> maxPool 2 ++>
+        -- newCLayer 4 8 7 3 ++> reluMulti ++> maxPool 2 ++>
+        reshape' ++> newDLayer (784,256) (relu, relu') ++> newDLayer (256,10) (relu, relu')
   putStrLn "Load training data."
-  dataset <- take 120 . uncurry zip <$> trainingData
+  dataset <- uncurry zip <$> trainingData
   nn <- iterateM cycle (online rate dataset) nn
-  flip mapM_ (take 10 dataset) $ \(ds,ev) -> do
+  testset <- uncurry zip <$> testData
+  flip mapM_ (take 10 testset) $ \(ds,ev) -> do
     putStrLn $ "+" ++ prettyResult (forward nn ds)
     putStrLn $ "*" ++ prettyResult ev
   where
@@ -134,15 +137,16 @@ traceERR nn iv ev rt lbl = do
   return nn'
 
 makeMNIST = do
-    let n1 = newCLayer 1  32 5 2 ++> reluMulti ++> maxPool 2
-        n2 = newCLayer 32 64 5 2 ++> reluMulti ++> maxPool 2
-        n3 = newDLayer (3136, 1024) (relu, relu') ++> newDLayer (1024,  10) (relu, relu')
-    nn <- n1 ++> n2 ++> reshape' ++> n3
+    -- nn <- newCLayer 1  8 7 3 ++> reluMulti ++> maxPool 2 ++>
+    --       newCLayer 8 16 7 3 ++> reluMulti ++> maxPool 2 ++>
+    --       reshape' ++> newDLayer (784,512) (relu, relu') ++> newDLayer (512,512) (relu, relu') ++> newDLayer (512,10) (relu, relu')
+    nn <- newCLayer 1 4 7 3 ++> reluMulti ++> maxPool 2 ++>
+          reshape' ++> newDLayer (784,256) (relu, relu') ++> newDLayer (256,10) (relu, relu')
     putStrLn "Load training data."
-    dataset <- take 200 . uncurry zip <$> trainingData
+    dataset <- uncurry zip <$> trainingData
     putStrLn "Load test data."
     putStrLn "Learning."
-    iterateM 100 (online dataset) nn
+    iterateM 30 (online dataset) nn
 
 dotest :: (Component n, Inp n ~ Image, Out n ~ Label) => n -> IO ()
 dotest !nn = do
@@ -153,7 +157,7 @@ dotest !nn = do
         (co,wr)= partition (uncurry (==)) $ zip result expect
     putStrLn $ printf "correct: %d, wrong: %d" (length co) (length wr)
 
-online = flip (foldl' $ learnStep (zipVectorWith cost') 0.002)
+online = flip (foldl' $ learnStep (zipVectorWith cost') 0.0010)
 iterateM :: Int -> (a -> a) -> a -> IO a
 iterateM n f x = walk 0 x
   where

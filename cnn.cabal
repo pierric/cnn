@@ -23,3 +23,6 @@ executable cnn
                        binary, bytestring, vector, deepseq, parallel, wl-pprint-extras
   -- hs-source-dirs:
   default-language:    Haskell2010
+  C-sources:           cbits/conv.c cbits/maxpool.c
+  cc-options:          -O3 -std=c11 -march=native
+  extra-libraries:     libopenblas

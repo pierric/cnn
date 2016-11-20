@@ -6,11 +6,12 @@ import Codec.Compression.GZip (decompress)
 import Control.Monad
 import Numeric.LinearAlgebra hiding (R)
 import Numeric.LinearAlgebra.Devel
+import qualified Data.Vector as V
 import Control.Monad.ST
 import CNN(R)
 
 type Pixel = Word8
-type Image = Vector R
+type Image = V.Vector (Matrix R)
 type Label = Vector R
 
 decodeImages :: Get [Image]
@@ -24,8 +25,8 @@ decodeImages = do
     pic :: Get Image
     pic = do
       bs <- getByteString (28*28)
-      return $ toVecDouble $ (fromByteString bs :: Vector Pixel)
-    toVecDouble :: Vector Pixel -> Image
+      return . V.singleton . reshape 28 . toVecDouble . fromByteString $ bs
+    toVecDouble :: Vector Pixel -> Vector R
     -- mapVectorM requires the monad be strict
     -- so Identity monad shall not be used
     toVecDouble v = runST $ mapVectorM (return . (/255) . fromIntegral) v

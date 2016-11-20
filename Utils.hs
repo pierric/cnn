@@ -1,4 +1,4 @@
-{-# LANGUAGE BangPatterns, FlexibleInstances, FlexibleContexts #-}
+{-# LANGUAGE BangPatterns, FlexibleInstances, FlexibleContexts, ForeignFunctionInterface #-}
 module Utils where
 import Numeric.LinearAlgebra
 import Numeric.LinearAlgebra.Devel
@@ -15,6 +15,9 @@ import qualified Data.Vector.Fusion.Bundle as VecFusion
 import qualified Data.Vector.Fusion.Bundle.Monadic as VecFusionM
 import qualified Data.Vector.Storable as VecS
 import qualified Data.Vector.Storable.Mutable as VecM
+import Foreign.Ptr ( Ptr )
+import Foreign.C.Types ( CInt(..) )
+import System.IO.Unsafe ( unsafePerformIO )
 
 fft2d :: Matrix (Complex Double) -> Matrix (Complex Double)
 fft2d m = let !x = fromRows $ map fft $ unsafeToRows m
@@ -66,8 +69,8 @@ conv2d_b !k !m | w1 > w2 && h1 < h2 = error "convolution cannot be performed"
 
 corr2d_b k m | w > s && h < t = error "convolution cannot be performed"
              | w < s && h > t = error "convolution cannot be performed"
-             | w > s     = conv2d_b (fliprl $ flipud m) k
-             | otherwise = conv2d_b (fliprl $ flipud k) m
+             | w > s     = conv2d_b (rotate m) k
+             | otherwise = conv2d_b (rotate k) m
   where
     (w,h)   = size k
     (s,t)   = size m
@@ -99,11 +102,42 @@ corr2d_s k m | w > s && h < t = error "correlation cannot be performed"
 
 conv2d_s k m | w > s && h < t = error "convolution cannot be performed"
              | w < s && h > t = error "convolution cannot be performed"
-             | w > s     = corr2d_s (fliprl $ flipud m) k
-             | otherwise = corr2d_s (fliprl $ flipud k) m
+             | w > s     = corr2d_s (rotate m) k
+             | otherwise = corr2d_s (rotate k) m
   where
     (w,h)   = size k
     (s,t)   = size m
+
+foreign import ccall unsafe corr_sf :: CInt -> CInt -> CInt -> Ptr Float ->
+                                       CInt -> CInt -> CInt -> Ptr Float ->
+                                       Ptr Float -> IO CInt
+foreign import ccall unsafe conv_sf :: CInt -> CInt -> CInt -> Ptr Float ->
+                                       CInt -> CInt -> CInt -> Ptr Float ->
+                                       Ptr Float -> IO CInt
+
+data CConvType = CConv | CCorr
+
+c_corr2d_g :: CConvType -> Matrix Float -> Matrix Float -> Matrix Float
+c_corr2d_g y k m | w > s = c_corr2d_s m k
+                 | orderOf k == RowMajor && orderOf m == RowMajor =
+                   let (r,c) = (s-w+1,t-h+1)
+                       v = unsafePerformIO $ do
+                             v <- VecM.unsafeNew (r * c)
+                             VecM.unsafeWith v $ \rp ->
+                               apply k id $ \kr kc ks kt kp ->
+                                 apply m id $ \mr mc ms mt mp ->
+                                   case y of
+                                     CCorr -> corr_sf kr kc ks kp mr mc ms mp rp
+                                     CConv -> conv_sf kr kc ks kp mr mc ms mp rp
+                             VecS.unsafeFreeze v
+                   in matrixFromVector RowMajor r c v
+                | otherwise = error "column major matrix not supported"
+  where
+    (w,h) = size k
+    (s,t) = size m
+
+c_corr2d_s = c_corr2d_g CCorr
+c_conv2d_s = c_corr2d_g CConv
 
 class ConvFD t where
   fromDouble :: Matrix Double -> Matrix t
@@ -115,24 +149,30 @@ instance ConvFD Float where
   fromDouble = single
   toDouble = double
 
-class Multiplicable c where
-    hadamard :: c -> c -> c
-instance (Num a, Element a) => Multiplicable (Vector a)
-  where
-    hadamard a b = zipVectorWith (*) a b
-instance (Num a, Element a) => Multiplicable (Matrix a)
-  where
-    hadamard a b = reshape (cols a) (flatten a `hadamard` flatten b)
+rotate :: Element t => Matrix t -> Matrix t
+rotate = fliprl . flipud
 
+parallel !vec = vec
 -- parallel :: NFData a => VecB.Vector a -> VecB.Vector a
--- parallel vec =
---     VecB.fromList (parlist $ VecB.toList vec)
+-- parallel vec = (VecB.tail vec `using` parvec) `pseq` vec
 --   where
---     parlist []     = []
---     parlist [a]    = [a]
---     parlist (a:as) = (as `using` parList rdeepseq) `pseq` a:as
+--     parvec = VecB.mapM (rparWith rdeepseq)
 
-parallel :: NFData a => VecB.Vector a -> VecB.Vector a
-parallel vec = (VecB.tail vec `using` parvec) `pseq` vec
+foreign import ccall unsafe pool2_f :: CInt -> CInt -> CInt -> Ptr Float ->
+                                       Ptr Float -> Ptr CInt -> IO ()
+c_max_pool2_f :: Matrix Float -> (Vector Int, Matrix Float)
+c_max_pool2_f mat
+  | orderOf mat == RowMajor = unsafePerformIO $ do
+        ind <- VecM.unsafeNew (r' * c')
+        mx  <- VecM.unsafeNew (r' * c')
+        VecM.unsafeWith ind $ \pind ->
+          VecM.unsafeWith mx $ \pmax ->
+            apply mat id $ \mr mc ms mt mp ->
+              pool2_f mr mc ms mp pmax pind
+        ind <- VecS.unsafeFreeze ind
+        mx  <- VecS.unsafeFreeze mx
+        return (VecS.map fromIntegral ind, matrixFromVector RowMajor r' c' mx)
   where
-    parvec = VecB.mapM (rparWith rdeepseq)
+    (r,c) = size mat
+    r'    = r `div` 2
+    c'    = c `div` 2

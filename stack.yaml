@@ -76,4 +76,4 @@ extra-lib-dirs:
 # Allow a newer minor version of GHC than the snapshot specifies
 # compiler-check: newer-minor
 ghc-options:
-    "*": -O3 -rtsopts -threaded
+    "*": -O3 -rtsopts
