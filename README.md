@@ -1,5 +1,5 @@
-# SNN
-This program implements a simple neron network, and is applied to solve digit recoginition task (MNIST).
+# CNN
+This program implements a convolutional neron network, and is applied to solve digit recoginition task (MNIST).
 
 ## Note on Windows:
 + The depend library HMatrix requires some efforts to install.

@@ -2,3 +2,4 @@
 cnn.EXE.prof
 cnn.prof
 data/
+libopenblas.dll

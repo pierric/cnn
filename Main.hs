@@ -15,17 +15,52 @@ import System.Environment
 import Text.PrettyPrint.Free hiding (flatten)
 import Control.Monad
 
-main = mnistMain
+main = makeMNIST >>= dotest
 
-mnistMain = makeMNIST >>= dotest
+makeMNIST = do
+    nn <- newCLayer 1 4 7 3 ++> reluMulti ++> maxPool 2 ++>
+          reshapeL ++>
+          newDLayer (784,256) (relu, relu') ++>
+          newDLayer (256,64)  (relu, relu') ++>
+          newDLayer (64,10)   (relu, relu')
+    putStrLn "Load training data."
+    dataset <- uncurry zip <$> trainingData
+    putStrLn "Load test data."
+    putStrLn "Learning."
+    iterateM 30 (online dataset) nn
 
+dotest :: (Component n, Inp n ~ Image, Out n ~ Label) => n -> IO ()
+dotest !nn = do
+    testset <- uncurry zip <$> testData
+    putStrLn "Start test"
+    let result = map (postprocess . forward nn . fst) testset `using` parList rdeepseq
+        expect = map (postprocess . snd) testset
+        (co,wr)= partition (uncurry (==)) $ zip result expect
+    putStrLn $ printf "correct: %d, wrong: %d" (length co) (length wr)
+
+online = flip (foldl' $ learnStep (zipVectorWith cost') 0.0010)
+iterateM :: Int -> (a -> a) -> a -> IO a
+iterateM n f x = walk 0 x
+  where
+    walk !i !a | i == n    = return a
+               | otherwise = do -- when (i `mod` 10 == 0) $ putStrLn ("Iteration " ++ show i)
+                                putStrLn ("Iteration " ++ show i)
+                                walk (i+1) (f a)
+
+postprocess :: Vector CNN.R -> Int
+postprocess = fst . maximumBy cmp . zip [0..] . toList
+  where cmp a b = compare (snd a) (snd b)
+
+--
+-- for debugging purpose
+--
 debug1 = do
     let n1 = CLayer (V.singleton $ V.fromList $ [(3><3)[-0.2,-0.2,-0.2,0,0,0,0,0,0], (3><3)[0,0,0,0,0.2,0.2,0.2,0,0]])
                     (V.fromList $ [0.1,0.1])
                     1
     nx <- reluMulti
     n2 <- maxPool 2
-    n3 <- reshape'
+    n3 <- reshapeL
     -- n4 <- newDLayer (25, 4) (relu, relu') ++> newDLayer (4,  2) (relu, relu')
     n4 <- newDLayer (8,  2) (relu, relu')
     let nn = n1 :+> nx :+> n2 :+> n3 :+> n4
@@ -52,7 +87,7 @@ debug1 = do
 debug2 = do
   nn <- newCLayer 1 2 3 1 ++> reluMulti ++> maxPool 2 ++>
         newCLayer 2 4 3 1 ++> reluMulti ++> maxPool 2 ++>
-        reshape' ++> newDLayer (196,30) (relu, relu') ++> newDLayer (30,10) (relu, relu')
+        reshapeL ++> newDLayer (196,30) (relu, relu') ++> newDLayer (30,10) (relu, relu')
   putStrLn "Load training data."
   dataset <- uncurry zip <$> trainingData
   let ts = take 120 dataset
@@ -70,10 +105,10 @@ debug3 = do
       rate  = read a1 :: Float
   -- nn <- newCLayer 1  16 5 2 ++> reluMulti ++> maxPool 2 ++>
   --       newCLayer 16 32 5 2 ++> reluMulti ++> maxPool 2 ++>
-  --       reshape' ++> newDLayer (1568,1024) (relu, relu') ++> newDLayer (1024,10) (relu, relu')
+  --       reshapeL ++> newDLayer (1568,1024) (relu, relu') ++> newDLayer (1024,10) (relu, relu')
   nn <- newCLayer 1 4 7 3 ++> reluMulti ++> maxPool 2 ++>
         -- newCLayer 4 8 7 3 ++> reluMulti ++> maxPool 2 ++>
-        reshape' ++> newDLayer (784,256) (relu, relu') ++> newDLayer (256,10) (relu, relu')
+        reshapeL ++> newDLayer (784,256) (relu, relu') ++> newDLayer (256,10) (relu, relu')
   putStrLn "Load training data."
   dataset <- uncurry zip <$> trainingData
   nn <- iterateM cycle (online rate dataset) nn
@@ -135,37 +170,3 @@ traceERR nn iv ev rt lbl = do
   putStrLn $ lbl ++ "##Err:" ++ show err
   let nn' = fst $ learn nn ot err rt
   return nn'
-
-makeMNIST = do
-    -- nn <- newCLayer 1  8 7 3 ++> reluMulti ++> maxPool 2 ++>
-    --       newCLayer 8 16 7 3 ++> reluMulti ++> maxPool 2 ++>
-    --       reshape' ++> newDLayer (784,512) (relu, relu') ++> newDLayer (512,512) (relu, relu') ++> newDLayer (512,10) (relu, relu')
-    nn <- newCLayer 1 4 7 3 ++> reluMulti ++> maxPool 2 ++>
-          reshape' ++> newDLayer (784,256) (relu, relu') ++> newDLayer (256,10) (relu, relu')
-    putStrLn "Load training data."
-    dataset <- uncurry zip <$> trainingData
-    putStrLn "Load test data."
-    putStrLn "Learning."
-    iterateM 30 (online dataset) nn
-
-dotest :: (Component n, Inp n ~ Image, Out n ~ Label) => n -> IO ()
-dotest !nn = do
-    testset <- uncurry zip <$> testData
-    putStrLn "Start test"
-    let result = map (postprocess . forward nn . fst) testset `using` parList rdeepseq
-        expect = map (postprocess . snd) testset
-        (co,wr)= partition (uncurry (==)) $ zip result expect
-    putStrLn $ printf "correct: %d, wrong: %d" (length co) (length wr)
-
-online = flip (foldl' $ learnStep (zipVectorWith cost') 0.0010)
-iterateM :: Int -> (a -> a) -> a -> IO a
-iterateM n f x = walk 0 x
-  where
-    walk !i !a | i == n    = return a
-               | otherwise = do -- when (i `mod` 10 == 0) $ putStrLn ("Iteration " ++ show i)
-                                putStrLn ("Iteration " ++ show i)
-                                walk (i+1) (f a)
-
-postprocess :: Vector CNN.R -> Int
-postprocess = fst . maximumBy cmp . zip [0..] . toList
-  where cmp a b = compare (snd a) (snd b)

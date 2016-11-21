@@ -4,6 +4,13 @@
 
 #define AT(p,s,x,y) ((p)+(s)*(x)+(y))
 
+
+// 2M byte working storage per thread.
+// sufficient to handle correlation/convolution wthin
+// the size (5x5, 128x128) or (7x7, 100x100)
+#define WORKINGSTORAGE 524288
+static _Thread_local float workingSto[WORKINGSTORAGE];
+
 /*
 input:  two matrices, assuming in row major, may not be in continuous. i.e.
         one row has only column number of elements, but its length is of
@@ -16,19 +23,13 @@ output: continuous row-major matrix of size u x v
               v = col2-co11+1
 */
 
-// 2M byte working storage per thread.
-// sufficient to handle convolution of the size (5x5, 128x128)
-#define WORKINGSTORAGE 524288
-static _Thread_local float workingSto[WORKINGSTORAGE];
-
-inline int conv_sf_general(
+int corr_sf_general(
     int reversemat1, int row1, int col1, int stride1, float *mat1,
     int row2, int col2, int stride2, float *mat2, float *mat3)
 {
     int u = row2-row1+1;
     int v = col2-col1+1;
     if ((u*v+1)*row1*col1 > WORKINGSTORAGE) return -1;
-    // float *ws = (float*)malloc((u*v+1)*row1*col1*sizeof(float));
     float *ws = workingSto;
     for(int i=0;i<u;i++) {
         for(int j=0;j<v;j++) {
@@ -41,7 +42,7 @@ inline int conv_sf_general(
     }
     float *vw = mat1;
     if (stride1 > col1 || reversemat1) {
-        // we have always an extra row1*col1 elements, pointed
+        // we have expecting an extra row1*col1 elements at hand, pointed
         // by ws at this point of time, and used for a continues
         // copy of the kernel matrix.
         vw = ws;
@@ -52,6 +53,7 @@ inline int conv_sf_general(
             p2 += stride1;
         }
     }
+    // reverse the kernel when do convolution.
     if(reversemat1) {
         int sz = row1*col1;
         for(int i=0;i<sz/2;i++) {
@@ -60,21 +62,9 @@ inline int conv_sf_general(
             vw[sz-1-i] = t;
         }
     }
+    // execute the matrix vector multiplication
     ws = workingSto;
     cblas_sgemv(CblasRowMajor, CblasNoTrans, u*v, row1*col1,
     		    1.0, ws, row1*col1, vw, 1, 0, mat3, 1);
-    // free(ws);
     return 0;
-}
-
-int corr_sf(int row1, int col1, int stride1, float *mat1,
-            int row2, int col2, int stride2, float *mat2, float *mat3)
-{
-    return conv_sf_general(0, row1, col1, stride1, mat1, row2, col2, stride2, mat2, mat3);
-}
-
-int conv_sf(int row1, int col1, int stride1, float *mat1,
-            int row2, int col2, int stride2, float *mat2, float *mat3)
-{
-    return conv_sf_general(1, row1, col1, stride1, mat1, row2, col2, stride2, mat2, mat3);
 }
