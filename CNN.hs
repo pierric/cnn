@@ -68,12 +68,22 @@ instance Component DLayer where
         let DLayer{dweights=w,dbiases=b,activate'=af'} = l
             -- back-propagated error before activation
             udelta = odelta `hadamard` cmap af' bv
-            -- update to biases
-            !d = b `add` scale (negate rate) udelta
-            -- update to weights
-            !m = w `add` (iv `outer` d )
             -- back-propagated error at input
             !idelta = w #> udelta
+            -- update to biases
+            ---- for what reason, could this expression
+            ---- entails a huge space leak?
+            !d = b `add` scale (negate rate) udelta
+            -- update to weights
+            ---- for what reason, could this expression: w `add` (iv `outer` d)
+            ---- entails a huge space leak? especially, neither 'seq' nor
+            ---- 'deepseq' helps a bit. The only workaround is to expand the
+            ---- add function, and call SV.force on the result vector, which
+            ---- explcitly copy and drop reference to orignal computed result.
+            !m = let (r,c) = size w
+                     dat1 = flatten (tr' w)
+                     dat2 = flatten (tr' (iv `outer` d))
+                 in matrixFromVector ColumnMajor r c $ SV.force $ dat1 `add` dat2
         in (l{dweights=m, dbiases=d}, idelta)
 
 -- convolutional layer
@@ -152,11 +162,11 @@ instance Component MaxPoolLayer where
   -- and then find the max element in each sub matrices.
   forwardT (MaxPoolLayer stride) !inp = PTrace $ parallel $ V.map mk inp
     where
-      mk inp = let (i,v) = pool stride inp in (size v, i, v)
-  output (PTrace a) = V.map (\(_,_,o) ->o) a
+      mk inp = let (!i,!v) = pool stride inp in (size v, i, v)
+  output (PTrace a) = V.map (\(_,_,!o) ->o) a
   -- use the saved index-of-max in each pool to propagate the error.
   learn l@(MaxPoolLayer stride) (PTrace t) odelta _ =
-      (l, V.zipWith gen t odelta)
+      let !idelta = V.zipWith gen t odelta in (l, idelta)
     where
       gen (!si,!iv,_) od = assert (si == size od) $ unpool stride iv od
 
