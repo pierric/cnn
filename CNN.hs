@@ -71,8 +71,6 @@ instance Component DLayer where
             -- back-propagated error at input
             !idelta = w #> udelta
             -- update to biases
-            ---- for what reason, could this expression
-            ---- entails a huge space leak?
             !d = b `add` scale (negate rate) udelta
             -- update to weights
             ---- for what reason, could this expression: w `add` (iv `outer` d)

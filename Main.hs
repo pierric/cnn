@@ -38,14 +38,19 @@ dotest !nn = do
         (co,wr)= partition (uncurry (==)) $ zip result expect
     putStrLn $ printf "correct: %d, wrong: %d" (length co) (length wr)
 
-online = flip (foldl' $ learnStep (zipVectorWith cost') 0.0010)
+online ds !nn = walk ds nn
+  where
+    walk []     !nn = nn
+    walk (d:ds) !nn = let !nn' = learnStep (zipVectorWith cost') 0.0010 nn d
+                      in walk ds nn'
+
 iterateM :: Int -> (a -> a) -> a -> IO a
 iterateM n f x = walk 0 x
   where
     walk !i !a | i == n    = return a
                | otherwise = do -- when (i `mod` 10 == 0) $ putStrLn ("Iteration " ++ show i)
                                 putStrLn ("Iteration " ++ show i)
-                                walk (i+1) (f a)
+                                walk (i+1) $! f a
 
 postprocess :: Vector CNN.R -> Int
 postprocess = fst . maximumBy cmp . zip [0..] . toList
